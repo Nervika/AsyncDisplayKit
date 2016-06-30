@@ -25,8 +25,8 @@
 #import "ASIndexedNodeContext.h"
 #import "ASDataController+Subclasses.h"
 
-//#define LOG(...) NSLog(__VA_ARGS__)
-#define LOG(...)
+#define LOG(...) NSLog(__VA_ARGS__)
+//#define LOG(...)
 
 const static NSUInteger kASDataControllerSizingCountPerProcessor = 5;
 
@@ -36,6 +36,7 @@ NSString * const ASDataControllerRowNodeKind = @"_ASDataControllerRowNodeKind";
   NSMutableArray *_externalCompletedNodes;    // Main thread only.  External data access can immediately query this if available.
   NSMutableDictionary *_completedNodes;       // Main thread only.  External data access can immediately query this if _externalCompletedNodes is unavailable.
   NSMutableDictionary *_editingNodes;         // Modified on _editingTransactionQueue only.  Updates propagated to _completedNodes.
+  NSMutableArray<NSNumber *> *_itemCountsFromDataSource;         // Main thread only.  Updates propagated to _editingNodes.
   
   ASMainSerialQueue *_mainSerialQueue;
   
@@ -445,12 +446,15 @@ NSString * const ASDataControllerRowNodeKind = @"_ASDataControllerRowNodeKind";
   _initialReloadDataHasBeenCalled = YES;
   [self performEditCommandWithBlock:^{
     ASDisplayNodeAssertMainThread();
-    [_editingTransactionQueue waitUntilAllOperationsAreFinished];
+    [self waitUntilAllUpdatesAreCommitted];
 
     NSUInteger sectionCount = [_dataSource numberOfSectionsInDataController:self];
     NSIndexSet *sectionIndexSet = [NSIndexSet indexSetWithIndexesInRange:NSMakeRange(0, sectionCount)];
     NSArray<ASIndexedNodeContext *> *contexts = [self _populateFromDataSourceWithSectionIndexSet:sectionIndexSet];
-
+      
+    [self invalidateDataSourceItemCounts];
+    [self itemCountsFromDataSource];
+    
     // Allow subclasses to perform setup before going into the edit transaction
     [self prepareForReloadData];
     
@@ -532,6 +536,27 @@ NSString * const ASDataControllerRowNodeKind = @"_ASDataControllerRowNodeKind";
     }
   }];
   return contexts;
+}
+
+- (void)invalidateDataSourceItemCounts
+{
+  ASDisplayNodeAssertMainThread();
+  _itemCountsFromDataSource = nil;
+}
+
+- (NSArray<NSNumber *> *)itemCountsFromDataSource
+{
+  ASDisplayNodeAssertMainThread();
+  if (_itemCountsFromDataSource == nil) {
+    id<ASDataControllerSource> source = self.dataSource;
+    NSInteger sectionCount = [source numberOfSectionsInDataController:self];
+    NSMutableArray<NSNumber *> *result = [NSMutableArray arrayWithCapacity:sectionCount];
+    for (NSInteger i = 0; i < sectionCount; i++) {
+      [result addObject:@([source dataController:self rowsInSection:i])];
+    }
+    _itemCountsFromDataSource = result;
+  }
+  return _itemCountsFromDataSource;
 }
 
 #pragma mark - Batching (External API)
@@ -757,8 +782,8 @@ NSString * const ASDataControllerRowNodeKind = @"_ASDataControllerRowNodeKind";
   [self performEditCommandWithBlock:^{
     ASDisplayNodeAssertMainThread();
     LOG(@"Edit Command - insertRows: %@", indexPaths);
-    
-    [_editingTransactionQueue waitUntilAllOperationsAreFinished];
+    [self waitUntilAllUpdatesAreCommitted];
+//    [_editingTransactionQueue waitUntilAllOperationsAreFinished];
 
     // Sort indexPath to avoid messing up the index when inserting in several batches
     NSArray *sortedIndexPaths = [indexPaths sortedArrayUsingSelector:@selector(compare:)];
